@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice-Controlled Browser Assistant with Camera and Motion Detection</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        .container {
+            text-align: center;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            margin-top: 20px;
+        }
+        #status, #result {
+            margin-top: 20px;
+            font-style: italic;
+        }
+        button {
+            margin: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        #videoElement {
+            width: 640px;
+            height: 480px;
+            background-color: #666;
+            margin-top: 20px;
+        }
+        #canvasElement {
+            display: none;
+        }
+        #debugInfo {
+            margin-top: 10px;
+            font-family: monospace;
+        }
+        #switchCameraButton {
+            display: none;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Voice-Controlled Browser Assistant with Camera and Motion Detection</h2>
+        <button id="cameraButton">Start/Stop Camera</button>
+        <button id="switchCameraButton">Switch Camera</button>
+        <button id="listenButton">Start/Stop Listening</button>
+        <div id="status"></div>
+        <div id="result"></div>
+        <video id="videoElement" autoplay></video>
+        <canvas id="canvasElement"></canvas>
+        <div id="debugInfo"></div>
+    </div>
+
+    <script>
+        const cameraButton = document.getElementById('cameraButton');
+        const listenButton = document.getElementById('listenButton');
+        const statusDiv = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+        const videoElement = document.getElementById('videoElement');
+        const canvasElement = document.getElementById('canvasElement');
+        const ctx = canvasElement.getContext('2d');
+        const debugInfo = document.getElementById('debugInfo');
+        let previousImageData;
+        let motionDetectionInterval;
+        let lastAlertTime = 0;
+
+        let cameraActive = false;
+        let listeningActive = false;
+        let recognition;
+
+        const switchCameraButton = document.getElementById('switchCameraButton');
+        let currentCameraIndex = 0;
+        let availableCameras = [];
+
+        // Check if the device has multiple cameras
+        async function checkMultipleCameras() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                console.log("enumerateDevices() not supported.");
+                return;
+            }
+
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                availableCameras = devices.filter(device => device.kind === 'videoinput');
+                if (availableCameras.length > 1) {
+                    switchCameraButton.style.display = 'inline-block';
+                    switchCameraButton.addEventListener('click', switchCamera);
+                }
+            } catch (err) {
+                console.error(`${err.name}: ${err.message}`);
+            }
+        }
+
+        checkMultipleCameras();
+
+        async function switchCamera() {
+            if (availableCameras.length < 2) return;
+
+            currentCameraIndex = (currentCameraIndex + 1) % availableCameras.length;
+            if (cameraActive) {
+                stopCamera();
+                await startCamera();
+            }
+        }
+
+        cameraButton.addEventListener('click', async () => {
+            if (cameraActive) {
+                stopCamera();
+            } else {
+                await startCamera();
+            }
+        });
+
+        listenButton.addEventListener('click', toggleListening);
+
+        function toggleListening() {
+            if (listeningActive) {
+                stopListening();
+            } else {
+                startListening();
+            }
+        }
+
+        function startCamera() {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: true })
+                    .then(function(stream) {
+                        videoElement.srcObject = stream;
+                        videoElement.onloadedmetadata = function(e) {
+                            videoElement.play();
+                            cameraActive = true;
+                            cameraButton.textContent = "Stop Camera";
+                            resultDiv.textContent = "Camera turned on.";
+                            
+                            // Set up canvas for motion detection
+                            canvasElement.width = videoElement.videoWidth;
+                            canvasElement.height = videoElement.videoHeight;
+                            
+                            // Start motion detection
+                            motionDetectionInterval = setInterval(detectMotion, 100); // Check every 100ms
+                        };
+                    })
+                    .catch(function(error) {
+                        console.error("Error accessing the camera", error);
+                        resultDiv.textContent = "Error accessing the camera.";
+                    });
+            } else {
+                resultDiv.textContent = "Camera access not supported in this browser.";
+            }
+        }
+
+        function stopCamera() {
+            if (cameraActive) {
+                const stream = videoElement.srcObject;
+                const tracks = stream.getTracks();
+
+                tracks.forEach(function(track) {
+                    track.stop();
+                });
+
+                videoElement.srcObject = null;
+                cameraActive = false;
+                cameraButton.textContent = "Start Camera";
+                resultDiv.textContent = "Camera turned off.";
+                
+                // Stop motion detection
+                clearInterval(motionDetectionInterval);
+                previousImageData = null;
+                debugInfo.textContent = '';
+            }
+        }
+
+        function detectMotion() {
+            if (!cameraActive) return;
+
+            ctx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+            const currentImageData = ctx.getImageData(0, 0, canvasElement.width, canvasElement.height);
+
+            if (previousImageData) {
+                const motionScore = calculateMotionScore(previousImageData.data, currentImageData.data);
+                debugInfo.textContent = `Motion score: ${motionScore.toFixed(2)}`;
+                if (motionScore > 5) { // Lowered threshold for small motions
+                    speakAlert();
+                }
+            }
+
+            previousImageData = currentImageData;
+        }
+
+        function calculateMotionScore(previous, current) {
+            const width = canvasElement.width;
+            const height = canvasElement.height;
+            const sampleSize = 10; // Check every 10th pixel
+            let score = 0;
+            let sampleCount = 0;
+
+            for (let y = 0; y < height; y += sampleSize) {
+                for (let x = 0; x < width; x += sampleSize) {
+                    const i = (y * width + x) * 4;
+                    const diff = Math.abs(previous[i] - current[i]) +
+                                 Math.abs(previous[i+1] - current[i+1]) +
+                                 Math.abs(previous[i+2] - current[i+2]);
+                    score += diff;
+                    sampleCount++;
+                }
+            }
+
+            return score / (sampleCount * 3); // Normalize the score
+        }
+
+        function speakAlert() {
+            const now = Date.now();
+            if (now - lastAlertTime > 1000) { // Ensure at least 1 second between alerts
+                const utterance = new SpeechSynthesisUtterance("Alert");
+                utterance.rate = 1.2; // Slightly faster than normal speech
+                speechSynthesis.speak(utterance);
+                lastAlertTime = now;
+            }
+        }
+
+        function startListening() {
+            if ('webkitSpeechRecognition' in window) {
+                recognition = new webkitSpeechRecognition();
+                recognition.continuous = true;
+                recognition.interimResults = false;
+                recognition.lang = 'en-US';
+
+                recognition.start();
+                listeningActive = true;
+                listenButton.textContent = "Stop Listening";
+                statusDiv.textContent = "Listening...";
+                console.log("Speech recognition started");
+
+                recognition.onresult = (event) => {
+                    const last = event.results.length - 1;
+                    const text = event.results[last][0].transcript.trim().toLowerCase();
+                    statusDiv.textContent = `You said: ${text}`;
+                    console.log(`Recognized text: ${text}`);
+                    handleCommand(text);
+                };
+
+                recognition.onerror = (event) => {
+                    statusDiv.textContent = `Error occurred in recognition: ${event.error}`;
+                    console.error(`Recognition error: ${event.error}`);
+                };
+
+                recognition.onend = () => {
+                    if (listeningActive) {
+                        recognition.start();
+                    }
+                };
+            } else {
+                statusDiv.textContent = "Speech recognition not supported in this browser.";
+                listenButton.disabled = true;
+                console.error("Speech recognition not supported");
+            }
+        }
+
+        function stopListening() {
+            if (recognition) {
+                recognition.stop();
+                listeningActive = false;
+                listenButton.textContent = "Start Listening";
+                statusDiv.textContent = "Listening stopped.";
+                console.log("Speech recognition stopped");
+            }
+        }
+
+        function handleCommand(command) {
+            if (command.includes('open new tab')) {
+                window.open('https://www.google.com', '_blank');
+                resultDiv.textContent = "Opened a new tab.";
+            } else if (command.includes('close tab')) {
+                window.close();
+                resultDiv.textContent = "Closed the current tab.";
+            } else if (command.includes('scroll down')) {
+                window.scrollBy(0, window.innerHeight);
+                resultDiv.textContent = "Scrolled down.";
+            } else if (command.includes('scroll up')) {
+                window.scrollBy(0, -window.innerHeight);
+                resultDiv.textContent = "Scrolled up.";
+            } else if (command.includes('turn off camera')) {
+                stopCamera();
+            } else {
+                resultDiv.textContent = "Command not recognized.";
+            }
+        }
+    </script>
+</body>
+</html>
